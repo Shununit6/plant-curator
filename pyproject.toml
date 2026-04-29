@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plant-curator"
+version = "0.1.0"
+description = "Auto-curate the best plant photos from a folder."
+requires-python = ">=3.9"
+dependencies = [
+    "click>=8.1",
+    "Pillow>=10.0",
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+plant-curator = "plant_curator.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["plant_curator*"]
