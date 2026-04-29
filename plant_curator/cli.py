@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 
 from . import cache as cache_mod
-from .cluster import kmeans
+from .cluster import collapse_bursts, kmeans, select_mmr
 from .ingest import Photo, list_photos
 from .score import Scores, score_image
 
@@ -123,10 +123,15 @@ def day(folder: Path, date_str: Optional[str], n: int, metric: str, spread: bool
 @click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--n", default=9, show_default=True, help="How many diverse picks.")
 @click.option("--by", "metric", type=click.Choice(METRICS), default="combined", show_default=True,
-              help="Score to rank within each cluster.")
+              help="Score used as MMR quality term.")
+@click.option("--lam", default=0.4, show_default=True,
+              help="MMR lambda: 1.0 = pure quality, 0.0 = pure diversity.")
+@click.option("--drop-pct", default=0.3, show_default=True,
+              help="Drop the bottom fraction by sharpness before selection.")
 @click.option("--out", "out", type=click.Path(file_okay=False, path_type=Path),
               default=None, help="Output folder for picks.")
-def portfolio(folder: Path, n: int, metric: str, out: Optional[Path]) -> None:
+def portfolio(folder: Path, n: int, metric: str, lam: float, drop_pct: float,
+              out: Optional[Path]) -> None:
     """N visually-diverse best picks for a grid post (e.g. Instagram 3x3)."""
     photos = list(list_photos(folder))
     if not photos:
@@ -139,17 +144,37 @@ def portfolio(folder: Path, n: int, metric: str, out: Optional[Path]) -> None:
     click.echo(f"Found {len(photos)} photos. Analyzing…")
     rows = _analyze(photos, with_embeddings=True)
 
-    embeddings = np.stack([r[2] for r in rows])
-    labels = kmeans(embeddings, k=n)
+    if drop_pct > 0:
+        sharps = sorted(r[1].sharpness for r in rows)
+        cutoff = sharps[int(drop_pct * len(sharps))]
+        before = len(rows)
+        rows = [r for r in rows if r[1].sharpness >= cutoff]
+        click.echo(f"Dropped bottom {drop_pct:.0%} by sharpness "
+                   f"({before - len(rows)} discarded, {len(rows)} remain).")
 
-    by_cluster: dict[int, list] = defaultdict(list)
-    for r, c in zip(rows, labels):
-        by_cluster[int(c)].append(r)
+    # Collapse bursts: photos within 90s and CLIP sim >= 0.75 = one subject
+    indexed = [(i, r[0].captured_at, r[2]) for i, r in enumerate(rows)
+               if r[0].captured_at is not None]
+    no_time = [i for i, r in enumerate(rows) if r[0].captured_at is None]
+    groups = collapse_bursts(indexed)
+    for i in no_time:
+        groups.append([i])
+    click.echo(f"Collapsed into {len(groups)} subject groups (from {len(rows)} photos).")
 
-    picks = []
-    for cluster_id, members in sorted(by_cluster.items()):
-        best = max(members, key=lambda r: _value(r[1], metric))
-        picks.append(best)
+    # Pick the highest-scored representative from each group
+    representatives = []
+    for grp in groups:
+        best = max(grp, key=lambda i: _value(rows[i][1], metric))
+        representatives.append(rows[best])
+
+    if len(representatives) <= n:
+        click.echo(f"Only {len(representatives)} subjects — returning all.")
+        picks = representatives
+    else:
+        embeddings = np.stack([r[2] for r in representatives])
+        scores = np.array([_value(r[1], metric) for r in representatives])
+        idxs = select_mmr(embeddings, scores, n=n, lam=lam)
+        picks = [representatives[i] for i in idxs]
 
     picks.sort(key=lambda r: r[0].captured_at or datetime.min)
 
