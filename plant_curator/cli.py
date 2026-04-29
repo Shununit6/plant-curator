@@ -2,13 +2,16 @@ import shutil
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import click
+import numpy as np
 from tqdm import tqdm
 
-from .ingest import list_photos
-from .score import score_image
+from . import cache as cache_mod
+from .cluster import kmeans
+from .ingest import Photo, list_photos
+from .score import Scores, score_image
 
 METRICS = ("sharpness", "exposure", "colorfulness", "combined")
 
@@ -116,10 +119,99 @@ def day(folder: Path, date_str: Optional[str], n: int, metric: str, spread: bool
         click.echo(f"\nCopied to {out}")
 
 
+@main.command()
+@click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--n", default=9, show_default=True, help="How many diverse picks.")
+@click.option("--by", "metric", type=click.Choice(METRICS), default="combined", show_default=True,
+              help="Score to rank within each cluster.")
+@click.option("--out", "out", type=click.Path(file_okay=False, path_type=Path),
+              default=None, help="Output folder for picks.")
+def portfolio(folder: Path, n: int, metric: str, out: Optional[Path]) -> None:
+    """N visually-diverse best picks for a grid post (e.g. Instagram 3x3)."""
+    photos = list(list_photos(folder))
+    if not photos:
+        click.echo(f"No JPG files found under {folder}")
+        return
+    if len(photos) <= n:
+        click.echo(f"Folder has only {len(photos)} photos; nothing to cluster.")
+        return
+
+    click.echo(f"Found {len(photos)} photos. Analyzing…")
+    rows = _analyze(photos, with_embeddings=True)
+
+    embeddings = np.stack([r[2] for r in rows])
+    labels = kmeans(embeddings, k=n)
+
+    by_cluster: dict[int, list] = defaultdict(list)
+    for r, c in zip(rows, labels):
+        by_cluster[int(c)].append(r)
+
+    picks = []
+    for cluster_id, members in sorted(by_cluster.items()):
+        best = max(members, key=lambda r: _value(r[1], metric))
+        picks.append(best)
+
+    picks.sort(key=lambda r: r[0].captured_at or datetime.min)
+
+    click.echo(f"\nPicked {len(picks)} diverse photos (one per cluster):\n")
+    click.echo(f"{'#':>2}  {'sharp':>7}  {'exp':>5}  {'color':>6}  {'captured':<19}  path")
+    click.echo("-" * 90)
+    for i, (ph, s, _) in enumerate(picks, 1):
+        ts = ph.captured_at.strftime("%Y-%m-%d %H:%M:%S") if ph.captured_at else "-"
+        click.echo(
+            f"{i:>2}  {s.sharpness:>7.1f}  {s.exposure:>5.3f}  {s.colorfulness:>6.1f}  "
+            f"{ts:<19}  {ph.path.relative_to(folder)}"
+        )
+
+    if out:
+        out.mkdir(parents=True, exist_ok=True)
+        for i, (ph, _, _) in enumerate(picks, 1):
+            shutil.copy2(ph.path, out / f"{i:02d}_{ph.path.name}")
+        click.echo(f"\nCopied to {out}")
+
+
 def _value(scores, metric: str) -> float:
     if metric == "combined":
         return scores.combined()
     return getattr(scores, metric)
+
+
+def _analyze(photos: List[Photo], with_embeddings: bool):
+    """Score (and optionally embed) photos using cache. Returns list of
+    (photo, Scores, embedding-or-None)."""
+    hashes = [cache_mod.file_hash(p.path) for p in photos]
+    cached = cache_mod.get(hashes)
+
+    need_score = [(p, h) for p, h in zip(photos, hashes)
+                  if not cached.get(h) or cached[h].sharpness is None]
+    if need_score:
+        for ph, h in tqdm(need_score, desc="Scoring", unit="img"):
+            s = score_image(ph.path)
+            cache_mod.put(h, sharpness=s.sharpness, exposure=s.exposure,
+                          colorfulness=s.colorfulness, captured_at=ph.captured_at)
+
+    if with_embeddings:
+        need_embed = [(p, h) for p, h in zip(photos, hashes)
+                      if not cached.get(h) or cached[h].embedding is None]
+        if need_embed:
+            from .embed import embed_images
+            click.echo(f"Embedding {len(need_embed)} photos with CLIP…")
+            paths = [p.path for p, _ in need_embed]
+            vecs = embed_images(paths)
+            for (_, h), v in zip(need_embed, vecs):
+                cache_mod.put(h, embedding=v)
+
+    final = cache_mod.get(hashes)
+    out: List[Tuple[Photo, Scores, Optional[np.ndarray]]] = []
+    for ph, h in zip(photos, hashes):
+        row = final[h]
+        s = Scores(
+            sharpness=row.sharpness or 0.0,
+            exposure=row.exposure or 0.0,
+            colorfulness=row.colorfulness or 0.0,
+        )
+        out.append((ph, s, row.embedding))
+    return out
 
 
 def _spread_picks(scored, n: int, metric: str):
