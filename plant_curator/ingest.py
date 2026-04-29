@@ -17,15 +17,21 @@ class Photo:
 
 def list_photos(folder: Path) -> Iterable[Photo]:
     for p in sorted(folder.rglob("*")):
+        if p.name.startswith("._") or p.name.startswith("."):
+            continue
         if p.suffix in JPG_EXTS and p.is_file():
             yield Photo(path=p, captured_at=_read_capture_time(p))
+
+
+_EXIF_SUB_IFD = 0x8769  # ExifIFDPointer — where DateTimeOriginal actually lives
 
 
 def _read_capture_time(path: Path) -> Optional[datetime]:
     try:
         with Image.open(path) as img:
             exif = img.getexif()
-            raw = exif.get(_EXIF_DATETIME_TAG)
+            sub = exif.get_ifd(_EXIF_SUB_IFD)
+            raw = sub.get(_EXIF_DATETIME_TAG) or exif.get(_EXIF_DATETIME_TAG)
         if not raw:
             return None
         return datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
