@@ -350,6 +350,102 @@ def _print_finds(rows, sims, order, folder, header: str) -> None:
         click.echo(f"{float(sims[idx]):>5.3f}  {ts:<19}  {ph.path.relative_to(folder)}")
 
 
+PRESETS = {
+    "instagram": (1080, 1080),
+    "square": (1080, 1080),
+    "portrait": (1080, 1350),
+    "story": (1080, 1920),
+    "landscape": (1080, 566),
+}
+
+
+@main.command()
+@click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--out", "out", type=click.Path(file_okay=False, path_type=Path), required=True,
+              help="Output folder for processed photos.")
+@click.option("--preset", type=click.Choice(list(PRESETS)), default="instagram", show_default=True,
+              help="Target dimensions.")
+@click.option("--quality", default=90, show_default=True, help="JPG quality 1-100.")
+@click.option("--auto-fix", is_flag=True,
+              help="Apply a mild levels stretch (recover dim or flat shots).")
+@click.option("--watermark", default=None, help="Optional watermark text in bottom-right.")
+def export(folder: Path, out: Path, preset: str, quality: int,
+           auto_fix: bool, watermark: Optional[str]) -> None:
+    """Resize photos for a social platform, strip EXIF, optionally apply mild fixes.
+    Originals are not modified."""
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+    photos = list(list_photos(folder))
+    if not photos:
+        click.echo(f"No JPG files found under {folder}")
+        return
+
+    target_w, target_h = PRESETS[preset]
+    out.mkdir(parents=True, exist_ok=True)
+
+    click.echo(f"Exporting {len(photos)} photos at {target_w}x{target_h} ({preset})…")
+    for ph in tqdm(photos, unit="img"):
+        img = Image.open(ph.path).convert("RGB")
+        img = ImageOps.fit(img, (target_w, target_h), Image.Resampling.LANCZOS,
+                           centering=(0.5, 0.5))
+        if auto_fix:
+            img = _levels_stretch(img)
+        if watermark:
+            img = _apply_watermark(img, watermark)
+        img.save(out / ph.path.name, "JPEG", quality=quality, optimize=True)
+    click.echo(f"Wrote {len(photos)} files to {out}")
+
+
+def _levels_stretch(img):
+    """Mild levels stretch: scale luminance from 1st-99th percentile to 0-255."""
+    arr = np.array(img)
+    luma = arr.mean(axis=2)
+    lo = float(np.percentile(luma, 1))
+    hi = float(np.percentile(luma, 99))
+    if hi - lo < 5:
+        return img
+    from PIL import Image as _Image
+    arr = np.clip((arr.astype(np.float32) - lo) * (255.0 / (hi - lo)), 0, 255).astype(np.uint8)
+    return _Image.fromarray(arr)
+
+
+def _apply_watermark(img, text: str):
+    from PIL import Image, ImageDraw, ImageFont
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    font_size = max(18, img.width // 50)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
+    except OSError:
+        font = ImageFont.load_default()
+    bbox = draw.textbbox((0, 0), text, font=font)
+    w = bbox[2] - bbox[0]
+    h = bbox[3] - bbox[1]
+    pad = max(8, font_size // 3)
+    margin = max(16, font_size)
+    x = img.width - w - margin
+    y = img.height - h - margin
+    draw.rectangle([x - pad, y - pad, x + w + pad, y + h + pad], fill=(0, 0, 0, 130))
+    draw.text((x, y), text, fill=(255, 255, 255, 230), font=font)
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+@main.command()
+@click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def unlike(folder: Path) -> None:
+    """Remove every photo in FOLDER from the taste model."""
+    photos = list(list_photos(folder))
+    if not photos:
+        click.echo(f"No JPG files found under {folder}")
+        return
+    for ph in photos:
+        h = cache_mod.file_hash(ph.path)
+        cache_mod.set_liked(h, False)
+    total = cache_mod.count_liked()
+    click.echo(f"Unliked {len(photos)} photos. Total liked examples remaining: {total}")
+
+
 def _value(scores, metric: str) -> float:
     if metric == "combined":
         return scores.combined()
