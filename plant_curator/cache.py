@@ -41,9 +41,14 @@ def _conn():
             exposure REAL,
             colorfulness REAL,
             captured_at TEXT,
-            embedding BLOB
+            embedding BLOB,
+            liked INTEGER NOT NULL DEFAULT 0
         )
     """)
+    try:
+        c.execute("ALTER TABLE photos ADD COLUMN liked INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     try:
         yield c
         c.commit()
@@ -71,6 +76,32 @@ def get(hashes: list[str]) -> dict[str, CacheRow]:
                 embedding=np.frombuffer(emb, dtype=np.float32) if emb else None,
             )
     return out
+
+
+def set_liked(h: str, liked: bool = True) -> None:
+    with _conn() as c:
+        existing = c.execute("SELECT 1 FROM photos WHERE hash = ?", (h,)).fetchone()
+        if existing:
+            c.execute("UPDATE photos SET liked = ? WHERE hash = ?", (1 if liked else 0, h))
+        else:
+            c.execute("INSERT INTO photos (hash, liked) VALUES (?, ?)",
+                      (h, 1 if liked else 0))
+
+
+def get_liked_embeddings() -> np.ndarray:
+    """Return all liked embeddings as an (N, D) array. Empty if none."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT embedding FROM photos WHERE liked = 1 AND embedding IS NOT NULL"
+        ).fetchall()
+    if not rows:
+        return np.empty((0, 512), dtype=np.float32)
+    return np.stack([np.frombuffer(r[0], dtype=np.float32) for r in rows])
+
+
+def count_liked() -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) FROM photos WHERE liked = 1").fetchone()[0]
 
 
 def put(

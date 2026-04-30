@@ -9,6 +9,7 @@ import numpy as np
 from tqdm import tqdm
 
 from . import cache as cache_mod
+from . import taste as taste_mod
 from .cluster import collapse_bursts, kmeans, select_mmr
 from .ingest import Photo, list_photos
 from .score import Scores, score_image
@@ -173,6 +174,16 @@ def portfolio(folder: Path, n: int, metric: str, lam: float, drop_pct: float,
     else:
         embeddings = np.stack([r[2] for r in representatives])
         scores = np.array([_value(r[1], metric) for r in representatives])
+        # Blend in taste-vector aesthetic score, if a model is trained
+        taste = taste_mod.compute_taste()
+        if taste is not None:
+            n_liked = cache_mod.count_liked()
+            aesthetic = taste_mod.aesthetic_scores(embeddings, taste)
+            # Min-max normalize technical scores into [0,1] before blending
+            s_min, s_max = float(scores.min()), float(scores.max())
+            tech = (scores - s_min) / (s_max - s_min) if s_max > s_min else np.ones_like(scores)
+            scores = 0.5 * tech + 0.5 * aesthetic
+            click.echo(f"Using taste model from {n_liked} liked examples.")
         idxs = select_mmr(embeddings, scores, n=n, lam=lam)
         picks = [representatives[i] for i in idxs]
 
@@ -193,6 +204,43 @@ def portfolio(folder: Path, n: int, metric: str, lam: float, drop_pct: float,
         for i, (ph, _, _) in enumerate(picks, 1):
             shutil.copy2(ph.path, out / f"{i:02d}_{ph.path.name}")
         click.echo(f"\nCopied to {out}")
+
+
+@main.command()
+@click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def like(folder: Path) -> None:
+    """Mark every photo in FOLDER as a liked example (training data for taste)."""
+    photos = list(list_photos(folder))
+    if not photos:
+        click.echo(f"No JPG files found under {folder}")
+        return
+
+    click.echo(f"Found {len(photos)} photos. Ensuring scores + embeddings…")
+    rows = _analyze(photos, with_embeddings=True)
+
+    for ph, _, _ in rows:
+        h = cache_mod.file_hash(ph.path)
+        cache_mod.set_liked(h, True)
+
+    total = cache_mod.count_liked()
+    click.echo(f"\nMarked {len(rows)} photos as liked.")
+    click.echo(f"Total liked examples in your taste model: {total}")
+    if total < taste_mod.MIN_EXAMPLES:
+        click.echo(f"(Need at least {taste_mod.MIN_EXAMPLES} liked photos before "
+                   f"the taste model kicks in. Keep going.)")
+    else:
+        click.echo("Taste model is active — future portfolio runs will use it.")
+
+
+@main.command()
+def taste() -> None:
+    """Show stats on your trained taste model."""
+    n = cache_mod.count_liked()
+    click.echo(f"Liked examples: {n}")
+    if n < taste_mod.MIN_EXAMPLES:
+        click.echo(f"Need at least {taste_mod.MIN_EXAMPLES} to activate the taste model.")
+    else:
+        click.echo("Taste model: active. Used by `portfolio` to bias picks toward your style.")
 
 
 def _value(scores, metric: str) -> float:
