@@ -1,8 +1,38 @@
 """Clustering and selection on L2-normalized CLIP embeddings."""
+from collections import defaultdict
 from datetime import datetime
 from typing import List, Sequence, Tuple
 
 import numpy as np
+
+
+def find_components(embeds: np.ndarray, threshold: float) -> List[List[int]]:
+    """Connected components of a similarity graph: edge between i,j if cos sim >= threshold.
+    Returns list of components, each a list of original indices."""
+    n = len(embeds)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    sims = embeds @ embeds.T
+    iu, ju = np.triu_indices(n, k=1)
+    over = sims[iu, ju] >= threshold
+    for i, j in zip(iu[over], ju[over]):
+        union(int(i), int(j))
+
+    groups: dict = defaultdict(list)
+    for i in range(n):
+        groups[find(i)].append(i)
+    return list(groups.values())
 
 
 def collapse_bursts(

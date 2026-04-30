@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from . import cache as cache_mod
 from . import taste as taste_mod
-from .cluster import collapse_bursts, kmeans, select_mmr
+from .cluster import collapse_bursts, find_components, kmeans, select_mmr
 from .ingest import Photo, list_photos
 from .score import Scores, score_image
 
@@ -241,6 +241,113 @@ def taste() -> None:
         click.echo(f"Need at least {taste_mod.MIN_EXAMPLES} to activate the taste model.")
     else:
         click.echo("Taste model: active. Used by `portfolio` to bias picks toward your style.")
+
+
+@main.command()
+@click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--out", "out", type=click.Path(file_okay=False, path_type=Path), required=True,
+              help="Output folder. In auto mode, group subfolders are created here.")
+@click.option("--like", "example", default=None,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="By-example mode: find photos similar to this image.")
+@click.option("--query", default=None,
+              help="By-phrase mode: find photos matching text (e.g. 'wooden fence').")
+@click.option("--n", default=20, show_default=True,
+              help="Top-N count for find modes.")
+@click.option("--min-group", default=4, show_default=True,
+              help="Minimum group size in auto mode.")
+@click.option("--threshold", default=0.78, show_default=True,
+              help="Cosine similarity threshold for auto-grouping.")
+def themes(folder: Path, out: Path, example: Optional[Path], query: Optional[str],
+           n: int, min_group: int, threshold: float) -> None:
+    """Cluster or search photos by visual theme.
+
+    \b
+    Three modes:
+      auto       (default)        plant-curator themes FOLDER --out OUT
+      by-example  --like PHOTO    plant-curator themes FOLDER --out OUT --like ref.jpg
+      by-phrase   --query TEXT    plant-curator themes FOLDER --out OUT --query "wooden fence"
+    """
+    if example and query:
+        click.echo("Use either --like or --query, not both.")
+        return
+
+    photos = list(list_photos(folder))
+    if not photos:
+        click.echo(f"No JPG files found under {folder}")
+        return
+
+    click.echo(f"Found {len(photos)} photos. Analyzing…")
+    rows = _analyze(photos, with_embeddings=True)
+    embeds = np.stack([r[2] for r in rows])
+
+    out.mkdir(parents=True, exist_ok=True)
+
+    if example:
+        from .embed import embed_images
+        target = embed_images([example])[0]
+        target = target / np.linalg.norm(target)
+        sims = embeds @ target
+        order = np.argsort(-sims)[:n]
+        _print_finds(rows, sims, order, folder, header=f"Top {n} similar to {example.name}")
+        for i, idx in enumerate(order, 1):
+            shutil.copy2(rows[idx][0].path, out / f"{i:02d}_{rows[idx][0].path.name}")
+        click.echo(f"\nCopied to {out}")
+        return
+
+    if query:
+        from .embed import embed_text
+        target = embed_text(query)
+        sims = embeds @ target
+        order = np.argsort(-sims)[:n]
+        _print_finds(rows, sims, order, folder, header=f"Top {n} for query {query!r}")
+        for i, idx in enumerate(order, 1):
+            shutil.copy2(rows[idx][0].path, out / f"{i:02d}_{rows[idx][0].path.name}")
+        click.echo(f"\nCopied to {out}")
+        return
+
+    # Auto mode: collapse bursts first so themes aren't dominated by burst dupes
+    indexed = [(i, r[0].captured_at, r[2]) for i, r in enumerate(rows)
+               if r[0].captured_at is not None]
+    no_time = [i for i, r in enumerate(rows) if r[0].captured_at is None]
+    burst_groups = collapse_bursts(indexed)
+    for i in no_time:
+        burst_groups.append([i])
+
+    rep_embeds = np.stack([rows[grp[0]][2] for grp in burst_groups])
+    components = find_components(rep_embeds, threshold)
+
+    full_groups: list[list[int]] = []
+    for comp in components:
+        flat = [idx for ri in comp for idx in burst_groups[ri]]
+        if len(flat) >= min_group:
+            full_groups.append(flat)
+    full_groups.sort(key=len, reverse=True)
+
+    if not full_groups:
+        click.echo(f"No themes with >= {min_group} members at sim >= {threshold}. "
+                   f"Try lowering --threshold or --min-group.")
+        return
+
+    click.echo(f"\nFound {len(full_groups)} theme(s):\n")
+    for gi, grp in enumerate(full_groups, 1):
+        sub = out / f"group-{gi:02d}"
+        sub.mkdir(parents=True, exist_ok=True)
+        click.echo(f"  group-{gi:02d}: {len(grp)} photos")
+        for i, idx in enumerate(grp, 1):
+            ph = rows[idx][0]
+            shutil.copy2(ph.path, sub / f"{i:02d}_{ph.path.name}")
+    click.echo(f"\nWritten to {out}/")
+
+
+def _print_finds(rows, sims, order, folder, header: str) -> None:
+    click.echo(f"\n{header}:\n")
+    click.echo(f"{'sim':>5}  {'captured':<19}  path")
+    click.echo("-" * 70)
+    for idx in order:
+        ph = rows[idx][0]
+        ts = ph.captured_at.strftime("%Y-%m-%d %H:%M:%S") if ph.captured_at else "-"
+        click.echo(f"{float(sims[idx]):>5.3f}  {ts:<19}  {ph.path.relative_to(folder)}")
 
 
 def _value(scores, metric: str) -> float:
