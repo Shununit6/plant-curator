@@ -145,6 +145,12 @@ def portfolio(folder: Path, n: int, metric: str, lam: float, drop_pct: float,
     click.echo(f"Found {len(photos)} photos. Analyzing…")
     rows = _analyze(photos, with_embeddings=True)
 
+    # Hard filter: never pick photos the user has explicitly disliked.
+    before = len(rows)
+    rows = [r for r in rows if cache_mod.get_state(cache_mod.file_hash(r[0].path)) != -1]
+    if before - len(rows) > 0:
+        click.echo(f"Excluded {before - len(rows)} explicitly disliked photos.")
+
     if drop_pct > 0:
         sharps = sorted(r[1].sharpness for r in rows)
         cutoff = sharps[int(drop_pct * len(sharps))]
