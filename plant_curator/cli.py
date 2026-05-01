@@ -162,30 +162,24 @@ def portfolio(folder: Path, n: int, metric: str, lam: float, drop_pct: float,
         groups.append([i])
     click.echo(f"Collapsed into {len(groups)} subject groups (from {len(rows)} photos).")
 
-    # Pick the highest-scored representative from each group
-    representatives = []
-    for grp in groups:
-        best = max(grp, key=lambda i: _value(rows[i][1], metric))
-        representatives.append(rows[best])
+    # Compute blended scores ONCE — used for burst-rep selection AND final MMR.
+    embeds_all = np.stack([r[2] for r in rows])
+    taste = taste_mod.compute_taste()
+    if taste is not None:
+        click.echo(f"Using taste model from {cache_mod.count_liked()} liked examples (70% weight).")
+    blended = _blended_scores(rows, embeds_all, metric, taste, taste_weight=0.7)
 
-    if len(representatives) <= n:
-        click.echo(f"Only {len(representatives)} subjects — returning all.")
-        picks = representatives
+    # Burst representatives: highest blended score within each group (taste-aware)
+    rep_idxs = [max(grp, key=lambda i: float(blended[i])) for grp in groups]
+
+    if len(rep_idxs) <= n:
+        click.echo(f"Only {len(rep_idxs)} subjects — returning all.")
+        picks = [rows[i] for i in rep_idxs]
     else:
-        embeddings = np.stack([r[2] for r in representatives])
-        scores = np.array([_value(r[1], metric) for r in representatives])
-        # Blend in taste-vector aesthetic score, if a model is trained
-        taste = taste_mod.compute_taste()
-        if taste is not None:
-            n_liked = cache_mod.count_liked()
-            aesthetic = taste_mod.aesthetic_scores(embeddings, taste)
-            # Min-max normalize technical scores into [0,1] before blending
-            s_min, s_max = float(scores.min()), float(scores.max())
-            tech = (scores - s_min) / (s_max - s_min) if s_max > s_min else np.ones_like(scores)
-            scores = 0.5 * tech + 0.5 * aesthetic
-            click.echo(f"Using taste model from {n_liked} liked examples.")
-        idxs = select_mmr(embeddings, scores, n=n, lam=lam)
-        picks = [representatives[i] for i in idxs]
+        rep_embeds = embeds_all[rep_idxs]
+        rep_scores = blended[rep_idxs]
+        mmr_idxs = select_mmr(rep_embeds, rep_scores, n=n, lam=lam)
+        picks = [rows[rep_idxs[i]] for i in mmr_idxs]
 
     picks.sort(key=lambda r: r[0].captured_at or datetime.min)
 
@@ -450,6 +444,31 @@ def _value(scores, metric: str) -> float:
     if metric == "combined":
         return scores.combined()
     return getattr(scores, metric)
+
+
+def _blended_scores(rows, embeds: np.ndarray, metric: str,
+                    taste: Optional[np.ndarray], taste_weight: float = 0.7) -> np.ndarray:
+    """Per-photo score in [0, 1]: additive normalized technical + taste alignment.
+    Used for both burst-representative selection and final MMR ranking."""
+    if metric == "combined":
+        sharps = np.array([r[1].sharpness for r in rows], dtype=np.float32)
+        exps = np.array([r[1].exposure for r in rows], dtype=np.float32)
+        colors = np.array([r[1].colorfulness for r in rows], dtype=np.float32)
+
+        def _mm(arr: np.ndarray) -> np.ndarray:
+            lo, hi = float(arr.min()), float(arr.max())
+            return (arr - lo) / (hi - lo) if hi > lo else np.ones_like(arr)
+
+        tech = (_mm(sharps) + _mm(exps) + _mm(colors)) / 3.0
+    else:
+        vals = np.array([_value(r[1], metric) for r in rows], dtype=np.float32)
+        lo, hi = float(vals.min()), float(vals.max())
+        tech = (vals - lo) / (hi - lo) if hi > lo else np.ones_like(vals)
+
+    if taste is None:
+        return tech.astype(np.float32)
+    aesthetic = (embeds @ taste + 1.0) / 2.0
+    return ((1 - taste_weight) * tech + taste_weight * aesthetic).astype(np.float32)
 
 
 def _analyze(photos: List[Photo], with_embeddings: bool):
