@@ -229,12 +229,52 @@ def like(folder: Path) -> None:
 @main.command()
 def taste() -> None:
     """Show stats on your trained taste model."""
-    n = cache_mod.count_liked()
-    click.echo(f"Liked examples: {n}")
-    if n < taste_mod.MIN_EXAMPLES:
-        click.echo(f"Need at least {taste_mod.MIN_EXAMPLES} to activate the taste model.")
+    nl = cache_mod.count_liked()
+    nd = cache_mod.count_disliked()
+    click.echo(f"Liked examples:    {nl}")
+    click.echo(f"Disliked examples: {nd}")
+    if nl < taste_mod.MIN_EXAMPLES:
+        click.echo(f"Need at least {taste_mod.MIN_EXAMPLES} liked to activate.")
+        return
+    if nd >= taste_mod.MIN_EXAMPLES:
+        click.echo("Taste model: ACTIVE in discriminative mode "
+                   "(direction = mean_liked − mean_disliked).")
     else:
-        click.echo("Taste model: active. Used by `portfolio` to bias picks toward your style.")
+        click.echo("Taste model: ACTIVE in centroid mode (only likes available; "
+                   "add dislikes for a sharper signal).")
+
+
+@main.command()
+@click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def dislike(folder: Path) -> None:
+    """Mark every photo in FOLDER not already liked as a negative example.
+
+    Run this on a session's source folder *after* `like` to give the model
+    implicit negatives — the photos you saw and chose not to pick. With
+    both signals, the taste vector points along (mean_liked − mean_disliked).
+    """
+    photos = list(list_photos(folder))
+    if not photos:
+        click.echo(f"No JPG files found under {folder}")
+        return
+
+    click.echo(f"Found {len(photos)} photos. Ensuring scores + embeddings…")
+    rows = _analyze(photos, with_embeddings=True)
+
+    skipped_liked = 0
+    marked = 0
+    for ph, _, _ in rows:
+        h = cache_mod.file_hash(ph.path)
+        if cache_mod.get_state(h) == 1:
+            skipped_liked += 1
+        else:
+            cache_mod.set_disliked(h, True)
+            marked += 1
+
+    click.echo(f"\nMarked {marked} photos as disliked.")
+    if skipped_liked:
+        click.echo(f"Skipped {skipped_liked} already-liked photos.")
+    click.echo(f"Total: {cache_mod.count_liked()} liked, {cache_mod.count_disliked()} disliked.")
 
 
 @main.command()

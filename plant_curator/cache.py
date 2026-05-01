@@ -79,20 +79,44 @@ def get(hashes: list[str]) -> dict[str, CacheRow]:
 
 
 def set_liked(h: str, liked: bool = True) -> None:
+    """Set state to liked (1) or clear (0)."""
+    _set_state(h, 1 if liked else 0)
+
+
+def set_disliked(h: str, disliked: bool = True) -> None:
+    """Set state to disliked (-1) or clear (0)."""
+    _set_state(h, -1 if disliked else 0)
+
+
+def _set_state(h: str, state: int) -> None:
     with _conn() as c:
         existing = c.execute("SELECT 1 FROM photos WHERE hash = ?", (h,)).fetchone()
         if existing:
-            c.execute("UPDATE photos SET liked = ? WHERE hash = ?", (1 if liked else 0, h))
+            c.execute("UPDATE photos SET liked = ? WHERE hash = ?", (state, h))
         else:
-            c.execute("INSERT INTO photos (hash, liked) VALUES (?, ?)",
-                      (h, 1 if liked else 0))
+            c.execute("INSERT INTO photos (hash, liked) VALUES (?, ?)", (h, state))
+
+
+def get_state(h: str) -> int:
+    """Returns 1 (liked), -1 (disliked), or 0 (unmarked)."""
+    with _conn() as c:
+        row = c.execute("SELECT liked FROM photos WHERE hash = ?", (h,)).fetchone()
+    return int(row[0]) if row else 0
 
 
 def get_liked_embeddings() -> np.ndarray:
-    """Return all liked embeddings as an (N, D) array. Empty if none."""
+    return _embeddings_for(state=1)
+
+
+def get_disliked_embeddings() -> np.ndarray:
+    return _embeddings_for(state=-1)
+
+
+def _embeddings_for(state: int) -> np.ndarray:
     with _conn() as c:
         rows = c.execute(
-            "SELECT embedding FROM photos WHERE liked = 1 AND embedding IS NOT NULL"
+            "SELECT embedding FROM photos WHERE liked = ? AND embedding IS NOT NULL",
+            (state,),
         ).fetchall()
     if not rows:
         return np.empty((0, 512), dtype=np.float32)
@@ -102,6 +126,11 @@ def get_liked_embeddings() -> np.ndarray:
 def count_liked() -> int:
     with _conn() as c:
         return c.execute("SELECT COUNT(*) FROM photos WHERE liked = 1").fetchone()[0]
+
+
+def count_disliked() -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) FROM photos WHERE liked = -1").fetchone()[0]
 
 
 def put(
