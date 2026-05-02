@@ -22,3 +22,6 @@ plant-curator = "plant_curator.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["plant_curator*"]
+
+[tool.setuptools.package-data]
+plant_curator = ["assets/textures/*.png"]

@@ -472,6 +472,27 @@ def _apply_watermark(img, text: str):
 
 
 @main.command()
+@click.argument("photo", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--template", type=click.Choice(["banner", "circle", "left", "quote"]),
+              default="banner", show_default=True)
+@click.option("--headline", default="", help="Main text. Use \\n for line breaks.")
+@click.option("--subline", default="", help="Smaller text below headline.")
+@click.option("--seal", default="", help="Red seal stamp text (banner template only).")
+@click.option("--out", "out", type=click.Path(dir_okay=False, path_type=Path),
+              required=True, help="Output JPG path.")
+def caption(photo: Path, template: str, headline: str, subline: str,
+            seal: str, out: Path) -> None:
+    """Add Mandarin/English captions to a photo (Xiaohongshu / RedNote style)."""
+    from . import caption as caption_mod
+    headline = headline.replace("\\n", "\n")
+    subline = subline.replace("\\n", "\n")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    caption_mod.render(template, photo, out, headline=headline,
+                       subline=subline, seal=seal)
+    click.echo(f"Wrote {out}")
+
+
+@main.command()
 @click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def unlike(folder: Path) -> None:
     """Remove every photo in FOLDER from the taste model."""
