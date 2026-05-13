@@ -251,6 +251,58 @@ def taste() -> None:
 
 
 @main.command()
+@click.option("--keep", "keep_pct", default=95, show_default=True, type=int,
+              help="Pick floors that keep at least this %% of your liked photos.")
+def floors(keep_pct: int) -> None:
+    """Recommend auto-reject thresholds derived from your labeled photos.
+
+    Reads sharpness, exposure, and colorfulness from the cache for every
+    liked and disliked photo, then prints the floors below which only the
+    bottom (100-keep)%% of liked photos fall. Each floor also shows how
+    much of the disliked pile it filters out — the higher that number, the
+    more "trash" gets removed before you have to review it.
+    """
+    import json
+    with cache_mod._conn() as c:
+        liked_rows = c.execute(
+            "SELECT sharpness, exposure, colorfulness FROM photos "
+            "WHERE liked = 1 AND sharpness IS NOT NULL"
+        ).fetchall()
+        dis_rows = c.execute(
+            "SELECT sharpness, exposure, colorfulness FROM photos "
+            "WHERE liked = -1 AND sharpness IS NOT NULL"
+        ).fetchall()
+    if not liked_rows or not dis_rows:
+        click.echo(f"Need both liked and disliked scored photos in cache. "
+                   f"Have {len(liked_rows)} liked, {len(dis_rows)} disliked.")
+        return
+    liked = np.array(liked_rows, dtype=np.float64)
+    dis = np.array(dis_rows, dtype=np.float64)
+    click.echo(f"\n{len(liked)} liked vs {len(dis)} disliked photos scored.")
+    click.echo(f"Picking floors that keep ≥{keep_pct}% of liked photos.\n")
+    out: dict[str, float] = {}
+    cols = [("sharpness", 0), ("exposure", 1), ("colorfulness", 2)]
+    for name, i in cols:
+        lv, dv = liked[:, i], dis[:, i]
+        threshold = float(np.percentile(lv, 100 - keep_pct))
+        kept = float((lv >= threshold).mean()) * 100
+        cut = float((dv < threshold).mean()) * 100
+        out[name] = round(threshold, 2)
+        click.echo(f"{name}")
+        click.echo(f"  liked    median={np.median(lv):>8.2f}   "
+                   f"5th%={np.percentile(lv, 5):>8.2f}   "
+                   f"95th%={np.percentile(lv, 95):>8.2f}")
+        click.echo(f"  disliked median={np.median(dv):>8.2f}   "
+                   f"5th%={np.percentile(dv, 5):>8.2f}   "
+                   f"95th%={np.percentile(dv, 95):>8.2f}")
+        click.echo(f"  floor:   {threshold:.2f}   "
+                   f"→ keeps {kept:.1f}% of liked, "
+                   f"rejects {cut:.1f}% of disliked\n")
+    click.echo("Suggested config:")
+    click.echo("  " + json.dumps(out))
+
+
+@main.command()
 @click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def dislike(folder: Path) -> None:
     """Mark every photo in FOLDER not already liked as a negative example.
