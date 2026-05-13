@@ -24,6 +24,28 @@ def main() -> None:
 
 @main.command()
 @click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--out", "out", type=click.Path(file_okay=False, path_type=Path),
+              default=None, help="Where to copy loved photos. Default: FOLDER/picks/")
+@click.option("--port", default=5750, show_default=True, help="Local port for the browser app.")
+def curate(folder: Path, out: Optional[Path], port: int) -> None:
+    """Visual review loop in your browser. One photo at a time, hotkeys.
+
+    \b
+    Keys:
+      1  love     → copies to picks/, taste model learns +
+      2  like     → taste model learns +
+      3  no       → taste model learns −
+      space       skip (no mark, advance)
+      ← / →       previous / next photo (no decision change)
+      u           clear current photo's decision
+    """
+    from .curate import serve
+    picks_dir = out if out is not None else folder / "picks"
+    serve(folder, picks_dir, port=port)
+
+
+@main.command()
+@click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--by", "metric", type=click.Choice(METRICS), default="sharpness", show_default=True,
               help="Score to rank by.")
 @click.option("--top", type=int, default=0, show_default=True,
